@@ -16,7 +16,11 @@
 
 package com.android.providers.telephony;
 
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+
+import android.Manifest;
 import android.annotation.NonNull;
+import android.annotation.SuppressLint;
 import android.app.AppOpsManager;
 import android.content.BroadcastReceiver;
 import android.content.ContentProvider;
@@ -35,6 +39,9 @@ import android.database.sqlite.SQLiteOpenHelper;
 import android.database.sqlite.SQLiteQueryBuilder;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Process;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Contacts;
@@ -47,14 +54,22 @@ import android.telephony.SmsMessage;
 import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.textclassifier.TextClassificationManager;
+import android.view.textclassifier.TextClassifier;
+import android.view.textclassifier.TextLinks;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.TelephonyPermissions;
+import com.android.internal.telephony.flags.Flags;
 import com.android.internal.telephony.util.TelephonyUtils;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
 public class SmsProvider extends ContentProvider {
     /* No response constant from SmsResponse */
     static final int NO_ERROR_CODE = -1;
@@ -77,14 +92,22 @@ public class SmsProvider extends ContentProvider {
     private static final int PERSON_ID_COLUMN = 0;
 
     /** Delete any raw messages or message segments marked deleted that are older than an hour. */
-    static final long RAW_MESSAGE_EXPIRE_AGE_MS = (long) (60 * 60 * 1000);
+    private static final long RAW_MESSAGE_EXPIRE_AGE_MS = TimeUnit.HOURS.toMillis(1);
+
+    /** A possible OTP message should only remain in its "pending otp classification" state for
+     * up to 5 seconds
+     */
+    private static final long OTP_CLASSIFICATION_TIMEOUT_MS = TimeUnit.SECONDS.toMillis(5);
+
+    /** OTP messages should be redacted for 3 hours */
+    private static final long OTP_HIDING_TIME_MS = TimeUnit.HOURS.toMillis(3);
 
     /**
      * These are the columns that are available when reading SMS
      * messages from the ICC.  Columns whose names begin with "is_"
      * have either "true" or "false" as their values.
      */
-    private final static String[] ICC_COLUMNS = new String[] {
+    private static final String[] ICC_COLUMNS = new String[] {
         // N.B.: These columns must appear in the same order as the
         // calls to add appear in convertIccToSms.
         "service_center_address",       // getServiceCenterAddress
@@ -101,8 +124,19 @@ public class SmsProvider extends ContentProvider {
         "error_code",                   // Always -1 (NO_ERROR_CODE), previously it was 0 always.
         "_id"
     };
+    private static final TextClassifier.EntityConfig TC_REQUEST_CONFIG =
+            new TextClassifier.EntityConfig.Builder()
+                    .setIncludedTypes(List.of(TextClassifier.TYPE_OTP))
+                    .includeTypesFromTextClassifier(false)
+                    .build();
 
     private final List<UserHandle> mUsersRemovedBeforeUnlockList = new ArrayList<>();
+
+    private final Executor mBackgroundExecutor = Executors.newSingleThreadExecutor();
+
+    private final Handler mMainThreadHandler = new Handler(Looper.getMainLooper());
+
+    private TextClassifier mTextClassifier;
 
     @Override
     public boolean onCreate() {
@@ -120,6 +154,8 @@ public class SmsProvider extends ContentProvider {
         userIntentFilter.addAction(Intent.ACTION_USER_UNLOCKED);
         getContext().registerReceiver(mUserIntentReceiver, userIntentFilter,
                 Context.RECEIVER_NOT_EXPORTED);
+        mTextClassifier = getContext().getSystemService(TextClassificationManager.class)
+                .getTextClassifier(TextClassifier.CLASSIFIER_TYPE_ANDROID_DEFAULT);
 
         return true;
     }
@@ -396,6 +432,20 @@ public class SmsProvider extends ContentProvider {
             orderBy = sort;
         } else if (qb.getTables().equals(smsTable)) {
             orderBy = Sms.DEFAULT_SORT_ORDER;
+        }
+
+        if (Flags.redactOtpSms() && smsTable.equals(qb.getTables()) && !canReadOtpSms(callingUid,
+                callingPackage)) {
+            // If this app can't read OTP messages, only return messages without OTPs, or messages
+            // more than the threshold old, or messages still pending classification, past the
+            // classification cutoff time.
+            long otpCutoff = System.currentTimeMillis() - OTP_HIDING_TIME_MS;
+            long pendingOtpCutoff = System.currentTimeMillis() - OTP_CLASSIFICATION_TIMEOUT_MS;
+            @SuppressLint("DefaultLocale")
+            String where = String.format("%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
+                    Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
+                    Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff);
+            qb.appendWhereStandalone(where);
         }
 
         Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
@@ -763,6 +813,7 @@ public class SmsProvider extends ContentProvider {
                     callerPkg + ";SmsProvider.insert;" + url, false);
         }
 
+        String possibleOtpMessage = null;
         if (table.equals(TABLE_SMS)) {
             boolean addDate = false;
             boolean addType = false;
@@ -813,6 +864,18 @@ public class SmsProvider extends ContentProvider {
             }
 
             if (type == Sms.MESSAGE_TYPE_INBOX) {
+
+                // Determine if incoming messages contain an OTP code
+                String message = values.getAsString(Sms.BODY);
+                int otpType;
+                if (Telephony.Sms.shouldCheckForOtp(message)) {
+                    otpType = Telephony.Sms.OTP_TYPE_PENDING;
+                    possibleOtpMessage = message;
+                } else {
+                    otpType = Telephony.Sms.OTP_TYPE_NONE;
+                }
+                values.put(Telephony.Sms.CONTAINS_OTP, otpType);
+
                 // Look up the person if not already filled in.
                 if ((values.getAsLong(Sms.PERSON) == null) && (!TextUtils.isEmpty(address))) {
                     Cursor cursor = null;
@@ -912,6 +975,11 @@ public class SmsProvider extends ContentProvider {
             if (Log.isLoggable(TAG, Log.VERBOSE)) {
                 Log.d(TAG, "insert " + uri + " succeeded");
             }
+            // If we might have an OTP, schedule the full otp check, which will update the inserted
+            // value when complete.
+            if (possibleOtpMessage != null) {
+                scheduleOtpCheck(uri, possibleOtpMessage);
+            }
             return uri;
         } else {
             Log.e(TAG, "insert: failed!");
@@ -941,6 +1009,52 @@ public class SmsProvider extends ContentProvider {
                 return SmsManager.STATUS_ON_ICC_UNREAD;
             }
         }
+    }
+
+    private void scheduleOtpCheck(Uri uri, String text) {
+        mBackgroundExecutor.execute(() -> {
+            TextLinks.Request request =
+                    new TextLinks.Request.Builder(text).setEntityConfig(TC_REQUEST_CONFIG).build();
+
+            TextLinks links = mTextClassifier.generateLinks(request);
+
+            int otpType = Sms.OTP_TYPE_NONE;
+            for (TextLinks.TextLink link : links.getLinks()) {
+                for (int i = 0; i < link.getEntityCount(); i++) {
+                    if (link.getEntity(i).equals(TextClassifier.TYPE_OTP)) {
+                        otpType = Sms.OTP_TYPE_CONTAINS_OTP;
+                        break;
+                    }
+                }
+            }
+            final int finalOtpType = otpType;
+            mBackgroundExecutor.execute(() -> {
+                ContentValues values = new ContentValues();
+                values.put(Sms.CONTAINS_OTP, finalOtpType);
+                update(uri, values, null);
+                if (finalOtpType == Sms.OTP_TYPE_CONTAINS_OTP) {
+                    // Schedule an update for when the OTP hiding time expires, to remove the "has
+                    // otp" value. This is best-effort, not guaranteed.
+                    mMainThreadHandler.postDelayed(() -> {
+                        ContentValues unredacted = new ContentValues();
+                        values.put(Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE);
+                        update(uri, unredacted, null);
+                    }, OTP_HIDING_TIME_MS);
+                }
+            });
+
+        });
+
+    }
+
+    private boolean canReadOtpSms(int uid, String packageName) {
+        if (getContext().checkPermission(Manifest.permission.RECEIVE_SENSITIVE_NOTIFICATIONS,
+                -1, uid) == PERMISSION_GRANTED) {
+            return true;
+        }
+        int op = getContext().getSystemService(AppOpsManager.class).noteOpNoThrow(
+                AppOpsManager.OP_RECEIVE_SENSITIVE_NOTIFICATIONS, uid, packageName, null, null);
+        return op == AppOpsManager.MODE_ALLOWED;
     }
 
     /**
@@ -1244,6 +1358,10 @@ public class SmsProvider extends ContentProvider {
         if (sqLiteOpenHelper instanceof MmsSmsDatabaseHelper) {
             ((MmsSmsDatabaseHelper) sqLiteOpenHelper).addDatabaseOpeningDebugLog(
                     callerPkg + ";SmsProvider.update;" + url, false);
+        }
+        if (callerUid != Process.myUid() && values.containsKey(Telephony.Sms.CONTAINS_OTP)) {
+            // Apps are not allowed to update the CONTAINS_OTP column directly
+            values.remove(Telephony.Sms.CONTAINS_OTP);
         }
 
         switch (match) {
