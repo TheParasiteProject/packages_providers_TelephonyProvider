@@ -1037,7 +1037,7 @@ public class SmsProvider extends ContentProvider {
                     // otp" value. This is best-effort, not guaranteed.
                     mMainThreadHandler.postDelayed(() -> {
                         ContentValues unredacted = new ContentValues();
-                        values.put(Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE);
+                        unredacted.put(Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE);
                         update(uri, unredacted, null);
                     }, OTP_HIDING_TIME_MS);
                 }
