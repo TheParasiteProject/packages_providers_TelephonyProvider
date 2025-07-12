@@ -123,7 +123,7 @@ public class SmsProvider extends ContentProvider {
     };
     private static final TextClassifier.EntityConfig TC_REQUEST_CONFIG =
             new TextClassifier.EntityConfig.Builder()
-                    .setIncludedTypes(List.of(TextClassifier.TYPE_OTP))
+                    .setIncludedTypes(List.of(TextClassifier.TYPE_SMS_RETRIEVER_OTP))
                     .includeTypesFromTextClassifier(false)
                     .build();
 
@@ -1025,7 +1025,7 @@ public class SmsProvider extends ContentProvider {
             int otpType = Sms.OTP_TYPE_NONE;
             for (TextLinks.TextLink link : links.getLinks()) {
                 for (int i = 0; i < link.getEntityCount(); i++) {
-                    if (link.getEntity(i).equals(TextClassifier.TYPE_OTP)) {
+                    if (link.getEntity(i).equals(TextClassifier.TYPE_SMS_RETRIEVER_OTP)) {
                         otpType = Sms.OTP_TYPE_CONTAINS_OTP;
                         break;
                     }
