@@ -43,6 +43,13 @@ public class SmsProviderTestable extends SmsProvider {
         }
     }
 
+    // Testable SmsProvider doesn't enforce OTP restrictions, as doing so requires elevated
+    // permissions the test version of the provider doesn't have.
+    @Override
+    protected boolean canReadOtpSms(int uid, String packageName) {
+        return true;
+    }
+
     /**
      * An in memory DB for SmsProviderTestable to use
      */

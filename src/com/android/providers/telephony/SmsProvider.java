@@ -1052,7 +1052,7 @@ public class SmsProvider extends ContentProvider {
     }
 
     @SuppressLint("MissingPermission")
-    private boolean canReadOtpSms(int uid, String packageName) {
+    protected boolean canReadOtpSms(int uid, String packageName) {
         return SmsManager.isAppTrustedForSmsOtp(getContext(), packageName, uid);
     }
 
