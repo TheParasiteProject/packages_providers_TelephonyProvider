@@ -39,6 +39,7 @@ import android.os.Binder;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Contacts;
@@ -438,26 +439,31 @@ public class SmsProvider extends ContentProvider {
             orderBy = Sms.DEFAULT_SORT_ORDER;
         }
 
-        if (Flags.redactOtpSms() && smsTable.equals(qb.getTables()) && !canReadOtpSms(callingUid,
-                callingPackage)) {
-            // If this app can't read OTP messages, only return messages without OTPs, or messages
-            // more than the threshold old, or messages still pending classification, past the
-            // classification cutoff time.
-            long otpCutoff = System.currentTimeMillis() - OTP_HIDING_TIME_MS;
-            long pendingOtpCutoff = System.currentTimeMillis() - OTP_CLASSIFICATION_TIMEOUT_MS;
-            @SuppressLint("DefaultLocale")
-            String where = String.format("%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
-                    Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
-                    Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff);
-            qb.appendWhereStandalone(where);
-        }
+        try {
+            Trace.beginSection("SmsProvider_query_otpSection");
+            if (Flags.redactOtpSms() && smsTable.equals(qb.getTables())
+                    && !canReadOtpSms(callingUid, callingPackage)) {
+                // If this app can't read OTP messages, only return messages without OTPs, or
+                // messages more than the threshold old, or messages still pending classification,
+                // past the classification cutoff time.
+                long otpCutoff = System.currentTimeMillis() - OTP_HIDING_TIME_MS;
+                long pendingOtpCutoff = System.currentTimeMillis() - OTP_CLASSIFICATION_TIMEOUT_MS;
+                @SuppressLint("DefaultLocale")
+                String where = String.format("%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
+                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
+                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff);
+                qb.appendWhereStandalone(where);
+            }
 
-        Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
-                              null, null, orderBy);
-        // TODO: Since the URLs are a mess, always use content://sms
-        ret.setNotificationUri(getContext().getContentResolver(),
-                NOTIFICATION_URI);
-        return ret;
+            Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
+                    null, null, orderBy);
+            // TODO: Since the URLs are a mess, always use content://sms
+            ret.setNotificationUri(getContext().getContentResolver(),
+                    NOTIFICATION_URI);
+            return ret;
+        } finally {
+            Trace.endSection();
+        }
     }
 
     private void purgeDeletedMessagesInRawTable(SQLiteDatabase db) {
@@ -1017,26 +1023,27 @@ public class SmsProvider extends ContentProvider {
 
     private void scheduleOtpCheck(Uri uri, String text) {
         mBackgroundExecutor.execute(() -> {
-            TextLinks.Request request =
-                    new TextLinks.Request.Builder(text).setEntityConfig(TC_REQUEST_CONFIG).build();
+            try {
+                Trace.beginSection("scheduleOtpCheck");
+                TextLinks.Request request =
+                        new TextLinks.Request.Builder(text).setEntityConfig(
+                                TC_REQUEST_CONFIG).build();
 
-            TextLinks links = mTextClassifier.generateLinks(request);
+                TextLinks links = mTextClassifier.generateLinks(request);
 
-            int otpType = Sms.OTP_TYPE_NONE;
-            for (TextLinks.TextLink link : links.getLinks()) {
-                for (int i = 0; i < link.getEntityCount(); i++) {
-                    if (link.getEntity(i).equals(TextClassifier.TYPE_SMS_RETRIEVER_OTP)) {
-                        otpType = Sms.OTP_TYPE_CONTAINS_OTP;
-                        break;
+                int otpType = Sms.OTP_TYPE_NONE;
+                for (TextLinks.TextLink link : links.getLinks()) {
+                    for (int i = 0; i < link.getEntityCount(); i++) {
+                        if (link.getEntity(i).equals(TextClassifier.TYPE_SMS_RETRIEVER_OTP)) {
+                            otpType = Sms.OTP_TYPE_CONTAINS_OTP;
+                            break;
+                        }
                     }
                 }
-            }
-            final int finalOtpType = otpType;
-            mBackgroundExecutor.execute(() -> {
                 ContentValues values = new ContentValues();
-                values.put(Sms.CONTAINS_OTP, finalOtpType);
+                values.put(Sms.CONTAINS_OTP, otpType);
                 update(uri, values, null);
-                if (finalOtpType == Sms.OTP_TYPE_CONTAINS_OTP) {
+                if (otpType == Sms.OTP_TYPE_CONTAINS_OTP) {
                     // Schedule an update for when the OTP hiding time expires, to remove the "has
                     // otp" value. This is best-effort, not guaranteed.
                     mMainThreadHandler.postDelayed(() -> {
@@ -1045,10 +1052,10 @@ public class SmsProvider extends ContentProvider {
                         update(uri, unredacted, null);
                     }, OTP_HIDING_TIME_MS);
                 }
-            });
-
+            } finally {
+                Trace.endSection();
+            }
         });
-
     }
 
     @SuppressLint("MissingPermission")
