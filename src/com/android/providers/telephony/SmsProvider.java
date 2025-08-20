@@ -57,6 +57,7 @@ import android.view.textclassifier.TextClassifier;
 import android.view.textclassifier.TextLinks;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.telephony.PackageBasedTokenUtil;
 import com.android.internal.telephony.SmsApplication;
 import com.android.internal.telephony.TelephonyPermissions;
 import com.android.internal.telephony.flags.Flags;
@@ -455,10 +456,17 @@ public class SmsProvider extends ContentProvider {
                 long otpCutoff = System.currentTimeMillis() - OTP_HIDING_TIME_MS;
                 long pendingOtpCutoff = System.currentTimeMillis() - OTP_CLASSIFICATION_TIMEOUT_MS;
                 @SuppressLint("DefaultLocale")
-                String where = String.format("%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
+                final StringBuilder where = new StringBuilder(String.format(
+                        "%s = %d OR %s < %d OR (%s = %d AND %s < %d)",
                         Sms.CONTAINS_OTP, Sms.OTP_TYPE_NONE, Sms.DATE, otpCutoff,
-                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff);
-                qb.appendWhereStandalone(where);
+                        Sms.CONTAINS_OTP, Sms.OTP_TYPE_PENDING, Sms.DATE, pendingOtpCutoff));
+                final String hash = PackageBasedTokenUtil.generatePackageBasedToken(
+                        getContext().getPackageManager(), callingPackage);
+                if (hash != null) {
+                    where.append(String.format(" OR (%s LIKE '%%%s%%')",
+                            Sms.BODY, hash));
+                }
+                qb.appendWhereStandalone(where.toString());
             }
 
             Cursor ret = qb.query(db, projectionIn, selection, selectionArgs,
