@@ -446,7 +446,8 @@ public class SmsProvider extends ContentProvider {
 
         try {
             Trace.beginSection("SmsProvider_query_otpSection");
-            if (Flags.redactOtpSms() && qb.getTables().startsWith(smsTable)
+            if (Telephony.Sms.isOtpRedactionEnabled(getContext())
+                    && qb.getTables().startsWith(smsTable)
                     && !canReadOtpSms(callingUid, callingPackage)) {
                 // If this app can't read OTP messages, only return messages without OTPs, or
                 // messages more than the threshold old, or messages still pending classification,
@@ -891,7 +892,7 @@ public class SmsProvider extends ContentProvider {
                 // Determine if incoming messages contain an OTP code
                 String message = values.getAsString(Sms.BODY);
                 int otpType;
-                if (Telephony.Sms.shouldCheckForOtp(message)) {
+                if (Telephony.Sms.shouldCheckForOtp(getContext(), message)) {
                     otpType = Telephony.Sms.OTP_TYPE_PENDING;
                     possibleOtpMessage = message;
                 } else {
