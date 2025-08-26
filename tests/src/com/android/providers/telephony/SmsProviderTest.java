@@ -24,7 +24,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import android.app.AppOpsManager;
-import android.app.admin.DevicePolicyManager;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -111,8 +110,6 @@ public class SmsProviderTest extends TestCase {
                 .thenReturn(mock(AppOpsManager.class));
         when(mContext.getSystemService(eq(Context.TELEPHONY_SERVICE)))
                 .thenReturn(mock(TelephonyManager.class));
-        when(mContext.getSystemService(eq(Context.DEVICE_POLICY_SERVICE)))
-                .thenReturn(mock(DevicePolicyManager.class));
 
         when(mContext.checkCallingOrSelfPermission(anyString()))
                 .thenReturn(PackageManager.PERMISSION_GRANTED);
